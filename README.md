@@ -181,13 +181,6 @@ Assurez-vous d'être dans le bon environnement conda/venv avec pythonocc-core in
 2. Redémarrez Claude Desktop
 3. Vérifiez les logs dans `~/Library/Logs/Claude/` (macOS)
 
-## 🤝 Contribution
-
-Ce serveur fait partie d'un système complet d'analyse STEP. Consultez également :
-- [GUIDE_RAPIDE.md](GUIDE_RAPIDE.md) - Guide de démarrage
-- [README_CONFIG_MANAGEMENT.md](README_CONFIG_MANAGEMENT.md) - Documentation technique
-- [SYNTHESE_PROJET.md](SYNTHESE_PROJET.md) - Vue d'ensemble du projet
-
 ## 📄 Licence
 
 Projet éducatif - Digital Challenge

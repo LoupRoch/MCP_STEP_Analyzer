@@ -1,0 +1,25 @@
+# Ignore everything by default, then whitelist the files to keep
+/*
+
+# Keep the .gitignore itself
+!/.gitignore
+
+# Keep only these project files at repo root
+!/Dockerfile
+!/baseline_comparator.py
+!/config_manager.py
+!/MCP_STEP.py
+!/README_MCP_SERVER.md
+
+# Common local/dev artefacts (redundant due to /* but convenient)
+__pycache__/
+*.py[cod]
+*.so
+.env
+.venv
+venv/
+env/
+build/
+dist/
+.ipynb_checkpoints/
+.DS_Store

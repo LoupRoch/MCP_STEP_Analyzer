@@ -143,7 +143,7 @@ def compare_step(file1: str, file2: str) -> Dict[str, Any]:
         "baseline1": comparator.baseline1.get('baseline_id'),
         "baseline2": comparator.baseline2.get('baseline_id'),
         "impact_level": overall_impact,
-        "impact_analysis": impact_report, # <--- C'est ce champ que l'IA va lire en priorité
+        "impact_analysis": impact_report,
         "changes_summary": {
             "components_added": len(comparator.changes['components_added']),
             "components_removed": len(comparator.changes['components_removed']),

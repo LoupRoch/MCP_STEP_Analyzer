@@ -6,39 +6,46 @@ Serveur MCP (Model Context Protocol) pour l'analyse et la comparaison de fichier
 
 ## ✨ Fonctionnalités
 
-Le serveur expose 6 outils via le protocole MCP :
+Le serveur expose 5 outils via le protocole MCP :
 
-### 1. `analyze_step`
-Analyse complète d'un fichier STEP avec génération de baseline
+### 1. `analyze_step_file`
+Analyse complète d'un fichier STEP : métadonnées, structure et géométrie
 - **Paramètre** : `file_path` (chemin vers le fichier STEP)
-- **Retour** : Baseline, BOM, propriétés géométriques, métadonnées
+- **Retour** : Métadonnées, BOM hiérarchique, composants détaillés, propriétés géométriques, dépendances, validation
 
-### 2. `compare_step`
-Compare deux fichiers STEP ou baselines et détecte les différences
+### 2. `compare_step_files`
+Compare deux fichiers STEP et détecte les différences critiques incluant les interfaces
 - **Paramètres** : 
-  - `file1` : premier fichier (STEP ou JSON baseline)
-  - `file2` : deuxième fichier (STEP ou JSON baseline)
-- **Retour** : Différences géométriques, BOM, métadonnées avec niveau d'impact
+  - `file1` : premier fichier STEP (baseline)
+  - `file2` : deuxième fichier STEP (version modifiée)
+- **Retour** : Analyse d'impact (clash, assembly, interfaces), changements (BOM, géométrie, topologie, interfaces), statistiques
 
-### 3. `get_bom`
-Extrait la nomenclature (Bill of Materials)
+### 3. `extract_bom`
+Extrait uniquement la nomenclature (Bill of Materials)
 - **Paramètre** : `file_path`
-- **Retour** : Liste hiérarchique des composants
+- **Retour** : Liste hiérarchique des composants avec position, niveau, quantité, nom et type
 
-### 4. `get_geometry`
-Extrait les propriétés géométriques
-- **Paramètre** : `file_path`
-- **Retour** : Volume, surface, centre de gravité pour chaque composant
+### 4. `extract_geometry`
+Extrait les propriétés géométriques détaillées
+- **Paramètres** : 
+  - `file_path` : chemin vers le fichier STEP
+  - `component_name` (optionnel) : nom du composant spécifique
+- **Retour** : Propriétés géométriques et topologiques par composant et totaux agrégés
 
-### 5. `validate_step`
-Valide la conformité d'un fichier STEP
+### 5. `validate_step_file`
+Valide la conformité d'un fichier STEP selon les standards industriels
 - **Paramètre** : `file_path`
-- **Retour** : Statut de validation avec détails des vérifications
+- **Retour** : Statut global et détails des vérifications
 
-### 6. `list_components`
-Liste tous les composants d'un assemblage
+### 6. `analyze_interfaces` ✨ NOUVEAU
+Analyse les interfaces et liaisons entre composants pour la gestion de configuration
 - **Paramètre** : `file_path`
-- **Retour** : Liste des composants avec type, niveau, quantité
+- **Retour** : Interfaces détectées (vissages, contacts, proximité), points critiques, graphe d'assemblage, recommandations
+
+**Types d'interfaces détectés** :
+- **Fixations (Fastening)** : Trous alignés → vissages/boulonnages (criticité ÉLEVÉE)
+- **Contacts (Contact)** : Surfaces en contact → encastrements (criticité MOYENNE)
+- **Proximité (Proximity)** : Composants proches (criticité FAIBLE)
 
 ## 🚀 Installation
 

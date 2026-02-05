@@ -3,7 +3,8 @@
 Configuration Management Analyzer for STEP Files
 Analyse de gestion de configuration pour objets industriels
 """
-from OCC.Core.BRepBndLib import brepbndlib_Add
+import os
+from OCC.Core.BRepBndLib import brepbndlib
 from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_COMPOUND
 from OCC.Core.IFSelect import IFSelect_RetDone
@@ -50,6 +51,7 @@ class ConfigurationManager:
         self.dependency_graph = defaultdict(list)
         self.colors_registry = {}
         self.materials_registry = {}
+        self.interfaces = []  # Interfaces entre composants
         
         # Load file
         self.load_file()
@@ -61,6 +63,14 @@ class ConfigurationManager:
         
     def load_file(self):
         """Charge le fichier STEP"""
+        # Validate file exists
+        if not os.path.exists(self.fname):
+            raise FileNotFoundError(f"Fichier STEP introuvable: {self.fname}")
+        
+        # Validate file extension
+        if not (self.fname.lower().endswith('.stp') or self.fname.lower().endswith('.step')):
+            raise ValueError(f"Extension de fichier invalide. Attendu .stp ou .step, reçu: {self.fname}")
+        
         try:
             # Create document
             self.doc = TDocStd_Document("pythonocc-config-manager")
@@ -80,8 +90,7 @@ class ConfigurationManager:
                 step_reader.Transfer(self.doc)
                 self._log(f"✓ Fichier '{self.fname}' chargé avec succès\n")
             else:
-                self._log(f"✗ Erreur lors du chargement du fichier")
-                return False
+                raise RuntimeError(f"Échec du chargement du fichier STEP. Status: {status}")
                 
             # Extract metadata
             self.extract_file_metadata()
@@ -89,7 +98,7 @@ class ConfigurationManager:
             
         except Exception as e:
             self._log(f"✗ Exception: {e}")
-            return False
+            raise
     
     def extract_file_metadata(self):
         """Extract metadata from STEP file header"""
@@ -272,66 +281,412 @@ class ConfigurationManager:
             self._log(f"    • {data['name']}: {len(data['instances'])} instance(s)")
 
     def analyze_geometry(self):
-        """Analyse géométrique complète (Sans filtre restrictif)"""
+        """Analyse géométrique complète avec granularité au niveau composant"""
         self._log("\n" + "="*80)
-        self._log("3. ANALYSE GÉOMÉTRIQUE & SPATIALE (Mode Complet)")
+        self._log("3. ANALYSE GÉOMÉTRIQUE & SPATIALE (Niveau Composant)")
         self._log("="*80)
         
-        labels = TDF_LabelSequence()
-        self.shape_tool.GetFreeShapes(labels)
+        # S'assurer que la BOM est construite
+        if not self.bom:
+            self.build_bom()
+        
+        if not self.bom:
+            self._log("  Aucun composant à analyser")
+            return
         
         self._log(f"\n  {'Composant':<30} {'BBox (Lxlxh)':<25} {'Topo (Trous)'}")
         self._log("  " + "-"*90)
         
+        # Analyser chaque composant de la BOM individuellement
+        labels = TDF_LabelSequence()
+        self.shape_tool.GetShapes(labels)
+        
+        # Créer un mapping entry -> label pour accès rapide
+        label_map = {}
         for i in range(labels.Length()):
             label = labels.Value(i+1)
-            if label.IsNull(): continue
+            if not label.IsNull():
+                entry = self.get_entry(label)
+                label_map[entry] = label
+        
+        # Parcourir la BOM et analyser chaque composant
+        for bom_item in self.bom:
+            entry = bom_item['label_entry']
+            name = bom_item['name']
+            is_root = (bom_item['level'] == 0)  # Détecter l'assemblage racine
             
-            name = label.GetLabelName()
-            shape = self.shape_tool.GetShape(label)
+            # Récupérer le label correspondant
+            if entry not in label_map:
+                continue
+                
+            label = label_map[entry]
             
-            if not shape.IsNull():
-                # 1. Volume
-                props = GProp_GProps()
-                brepgprop.VolumeProperties(shape, props)
-                volume = props.Mass()
+            # Pour les assemblages, on récupère aussi les composants référencés
+            if self.shape_tool.IsAssembly(label):
+                # Analyser l'assemblage lui-même si c'est la racine
+                if is_root:
+                    self._analyze_single_component(label, is_root=True)
                 
-                # 2. Bounding Box
-                bbox_data = self._get_bounding_box(shape)
-                bbox_str = f"{bbox_data['dims'][0]}x{bbox_data['dims'][1]}x{bbox_data['dims'][2]}"
+                # Pour un assemblage, analyser les sous-composants
+                comps = TDF_LabelSequence()
+                self.shape_tool.GetComponents(label, comps, False)
                 
-                # 3. Topologie (Trous & Faces)
-                # MODIFICATION : On analyse systématiquement tout ce qui a des faces.
-                # On ne filtre plus sur TopAbs_SOLID ou IsAssembly.
-                features = {}
-                try:
-                    # Petit test rapide pour voir si la shape est vide
-                    exp = TopExp_Explorer(shape, TopAbs_FACE)
-                    if exp.More():
-                        features = self._extract_geometric_features(shape)
-                except Exception as e:
-                    self._log(f"  Erreur analyse topo sur {name}: {e}")
+                for j in range(comps.Length()):
+                    c_label = comps.Value(j+1)
+                    if c_label.IsNull():
+                        continue
+                    
+                    ref_label = TDF_Label()
+                    if self.shape_tool.GetReferredShape(c_label, ref_label) and not ref_label.IsNull():
+                        # Analyser le composant référencé
+                        self._analyze_single_component(ref_label)
+            else:
+                # Composant simple (part)
+                self._analyze_single_component(label)
+        
+        self._log(f"\n  Total analysé: {len(self.geometric_props)} composants")
+        
+        # Ajouter les noms uniques pour gérer les doublons
+        self.add_unique_names_to_geometry()
+    
+    def _analyze_single_component(self, label, is_root=False):
+        """Analyse un seul composant et stocke ses propriétés
+        
+        Args:
+            label: Label du composant à analyser
+            is_root: True si c'est l'assemblage racine
+        """
+        entry = self.get_entry(label)
+        
+        # Éviter de réanalyser le même composant
+        if entry in self.geometric_props:
+            return
+        
+        simple_name = label.GetLabelName()
+        shape = self.shape_tool.GetShape(label)
+        
+        if shape.IsNull():
+            if not self.silent:
+                self._log(f"  Warning: Shape nulle pour {simple_name} (entry: {entry})")
+            return
+        
+        try:
+            # 1. Volume
+            props = GProp_GProps()
+            brepgprop.VolumeProperties(shape, props)
+            volume = props.Mass()
+            
+            # 2. Surface area
+            props_surface = GProp_GProps()
+            brepgprop.SurfaceProperties(shape, props_surface)
+            surface_area = props_surface.Mass()
+            
+            # 3. Center of gravity
+            cog = props.CentreOfMass()
+            
+            # 4. Bounding Box
+            bbox_data = self._get_bounding_box(shape)
+            bbox_str = f"{bbox_data['dims'][0]}x{bbox_data['dims'][1]}x{bbox_data['dims'][2]}"
+            
+            # 5. Topologie (Trous & Faces)
+            features = {}
+            try:
+                exp = TopExp_Explorer(shape, TopAbs_FACE)
+                if exp.More():
+                    features = self._extract_geometric_features(shape)
+            except Exception as e:
+                if not self.silent:
+                    self._log(f"  Warning: Erreur analyse topo sur {simple_name}: {e}")
 
-                # Résumé log
-                holes_summary = ""
-                if features.get('holes'):
-                    count = len(features['holes'])
-                    holes_summary = f"{count} trous détectés"
+            # Résumé log
+            holes_summary = ""
+            if features.get('holes'):
+                count = len(features['holes'])
+                holes_summary = f"{count} trous"
+            
+            self.geometric_props[entry] = {
+                'name': simple_name,
+                'volume': volume,
+                'surface_area': surface_area,
+                'center_of_gravity': [cog.X(), cog.Y(), cog.Z()],
+                'bbox': bbox_data,
+                'features_signature': features
+            }
+            
+            self._log(f"  {simple_name:<30} {bbox_str:<25} {holes_summary}")
+            
+        except Exception as e:
+            if not self.silent:
+                self._log(f"  Erreur lors de l'analyse de {simple_name}: {e}")
+
+
+    def build_component_path(self, label):
+        """Construit le chemin hiérarchique complet d'un composant
+        
+        Retourne une chaîne du type: "assembly > sub_assembly > part"
+        pour identifier de manière unique chaque composant même avec nom dupliqué.
+        """
+        entry = self.get_entry(label)
+        path_parts = []
+        
+        # Trouver le composant dans la BOM et remonter la hiérarchie
+        bom_dict = {item['label_entry']: item for item in self.bom}
+        
+        if entry in bom_dict:
+            current_item = bom_dict[entry]
+            path_parts.insert(0, current_item['name'])
+            
+            # Trouver les parents en cherchant les niveaux inférieurs
+            current_level = current_item['level']
+            current_pos = current_item['position']
+            
+            # Parcourir la BOM en arrière pour trouver les parents
+            for i in range(current_pos - 1, 0, -1):
+                if i <= len(self.bom):
+                    parent_item = self.bom[i-1]
+                    if parent_item['level'] < current_level:
+                        path_parts.insert(0, parent_item['name'])
+                        current_level = parent_item['level']
+                        if current_level == 0:
+                            break
+        
+        return " > ".join(path_parts) if path_parts else label.GetLabelName()
+    
+    def add_unique_names_to_geometry(self):
+        """Ajoute les noms uniques et chemins aux propriétés géométriques"""
+        # Créer un mapping entry -> label
+        labels = TDF_LabelSequence()
+        self.shape_tool.GetShapes(labels)
+        label_map = {}
+        for i in range(labels.Length()):
+            label = labels.Value(i+1)
+            if not label.IsNull():
+                entry = self.get_entry(label)
+                label_map[entry] = label
+        
+        # Compter les occurrences de chaque nom
+        name_counts = defaultdict(int)
+        for props in self.geometric_props.values():
+            name_counts[props['name']] += 1
+        
+        # Ajouter unique_name et path
+        for entry, props in self.geometric_props.items():
+            if entry in label_map:
+                label = label_map[entry]
+                simple_name = props['name']
                 
-                self.geometric_props[self.get_entry(label)] = {
-                    'name': name,
-                    'volume': volume,
-                    'bbox': bbox_data,
-                    'features_signature': features
-                }
+                # Si nom dupliqué, utiliser le chemin complet
+                if name_counts[simple_name] > 1:
+                    path = self.build_component_path(label)
+                    props['unique_name'] = path
+                    props['path'] = path
+                else:
+                    props['unique_name'] = simple_name
+                    props['path'] = self.build_component_path(label)
+
+    
+    def analyze_interfaces(self):
+        """Analyse les interfaces et liaisons entre composants
+        
+        Détecte :
+        - Vissages/boulonnages (trous alignés entre composants)
+        - Encastrements (surfaces en contact)
+        - Proximité spatiale (composants proches)
+        
+        Returns:
+            Liste des interfaces détectées avec type et propriétés
+        """
+        self._log("\n" + "="*80)
+        self._log("ANALYSE DES INTERFACES")
+        self._log("="*80)
+        
+        # S'assurer que la géométrie est analysée
+        if not self.geometric_props:
+            self.analyze_geometry()
+        
+        interfaces = []
+        components_list = list(self.geometric_props.items())
+        
+        self._log(f"\nAnalyse de {len(components_list)} composants...")
+        
+        # Comparer chaque paire de composants
+        for i in range(len(components_list)):
+            entry1, comp1 = components_list[i]
+            
+            for j in range(i + 1, len(components_list)):
+                entry2, comp2 = components_list[j]
                 
-                self._log(f"  {name:<30} {bbox_str:<25} {holes_summary}")
+                # Ignorer si même composant ou si l'un est l'assemblage racine
+                if entry1 == entry2:
+                    continue
+                
+                # Analyser l'interface entre comp1 et comp2
+                interface = self._analyze_component_pair(entry1, comp1, entry2, comp2)
+                
+                if interface:
+                    interfaces.append(interface)
+        
+        self.interfaces = interfaces
+        
+        # Résumé
+        self._log(f"\n  Total interfaces détectées: {len(interfaces)}")
+        
+        # Grouper par type
+        from collections import Counter
+        type_counts = Counter(iface['type'] for iface in interfaces)
+        
+        for iface_type, count in type_counts.items():
+            self._log(f"    • {iface_type}: {count}")
+        
+        # Afficher les interfaces critiques (vissages)
+        fasteners = [iface for iface in interfaces if iface['type'] == 'fastening']
+        if fasteners:
+            self._log(f"\n  Interfaces de fixation détectées:")
+            for iface in fasteners[:5]:  # Afficher les 5 premières
+                self._log(f"    • {iface['component1']} ↔ {iface['component2']}")
+                self._log(f"      {iface['fastener_count']} fixations (Ø{iface['fastener_diameter']}mm)")
+        
+        return interfaces
+    
+    def _analyze_component_pair(self, entry1, comp1, entry2, comp2):
+        """Analyse l'interface entre deux composants
+        
+        Returns:
+            Dictionnaire décrivant l'interface ou None si pas d'interface
+        """
+        name1 = comp1.get('unique_name', comp1['name'])
+        name2 = comp2.get('unique_name', comp2['name'])
+        
+        # 1. Vérifier proximité spatiale via bounding boxes
+        bbox1 = comp1.get('bbox', {})
+        bbox2 = comp2.get('bbox', {})
+        
+        if not bbox1 or not bbox2:
+            return None
+        
+        # Distance entre centres (approximation rapide)
+        cog1 = comp1.get('center_of_gravity', [0, 0, 0])
+        cog2 = comp2.get('center_of_gravity', [0, 0, 0])
+        
+        distance = ((cog1[0] - cog2[0])**2 + 
+                   (cog1[1] - cog2[1])**2 + 
+                   (cog1[2] - cog2[2])**2)**0.5
+        
+        # Si trop éloignés, pas d'interface
+        max_bbox_size = max(bbox1['dims'] + bbox2['dims'])
+        if distance > max_bbox_size * 2:
+            return None
+        
+        # 2. Analyser les trous pour détecter les fixations
+        holes1 = comp1.get('features_signature', {}).get('holes', [])
+        holes2 = comp2.get('features_signature', {}).get('holes', [])
+        
+        aligned_holes = self._find_aligned_holes(holes1, holes2)
+        
+        if aligned_holes:
+            # Interface de type vissage/boulonnage
+            # Grouper par diamètre
+            diameters = {}
+            for h1, h2 in aligned_holes:
+                d = h1['d']
+                if d not in diameters:
+                    diameters[d] = []
+                diameters[d].append((h1, h2))
+            
+            # Utiliser le diamètre le plus courant
+            main_diameter = max(diameters.keys(), key=lambda d: len(diameters[d]))
+            
+            return {
+                'type': 'fastening',
+                'component1': name1,
+                'component2': name2,
+                'entry1': entry1,
+                'entry2': entry2,
+                'fastener_count': len(aligned_holes),
+                'fastener_diameter': main_diameter,
+                'fastener_positions': [
+                    {'x': h1['x'], 'y': h1['y'], 'z': h1['z']} 
+                    for h1, _ in aligned_holes
+                ],
+                'severity': 'critical',  # Vissage = critique pour assemblage
+                'description': f"{len(aligned_holes)} fixation(s) Ø{main_diameter}mm"
+            }
+        
+        # 3. Si composants proches mais pas de trous alignés
+        # Vérifier si surfaces potentiellement en contact
+        if distance < max_bbox_size * 0.3:
+            # Contact ou encastrement probable
+            return {
+                'type': 'contact',
+                'component1': name1,
+                'component2': name2,
+                'entry1': entry1,
+                'entry2': entry2,
+                'distance': round(distance, 2),
+                'severity': 'major',
+                'description': f"Contact/encastrement (distance: {distance:.1f}mm)"
+            }
+        
+        # 4. Proximité sans contact direct
+        if distance < max_bbox_size:
+            return {
+                'type': 'proximity',
+                'component1': name1,
+                'component2': name2,
+                'entry1': entry1,
+                'entry2': entry2,
+                'distance': round(distance, 2),
+                'severity': 'minor',
+                'description': f"Proximité (distance: {distance:.1f}mm)"
+            }
+        
+        return None
+    
+    def _find_aligned_holes(self, holes1, holes2, tolerance=2.0):
+        """Trouve les paires de trous alignés entre deux composants
+        
+        Args:
+            holes1: Liste des trous du composant 1
+            holes2: Liste des trous du composant 2
+            tolerance: Tolérance d'alignement en mm (défaut: 2mm)
+        
+        Returns:
+            Liste de tuples (trou1, trou2) pour les trous alignés
+        """
+        aligned = []
+        
+        for h1 in holes1:
+            for h2 in holes2:
+                # Vérifier si même diamètre (±0.1mm)
+                if abs(h1['d'] - h2['d']) > 0.1:
+                    continue
+                
+                # Vérifier alignement spatial
+                # Les trous doivent être alignés sur au moins 2 axes
+                dx = abs(h1['x'] - h2['x'])
+                dy = abs(h1['y'] - h2['y'])
+                dz = abs(h1['z'] - h2['z'])
+                
+                # Compter les axes alignés
+                aligned_axes = sum([dx < tolerance, dy < tolerance, dz < tolerance])
+                
+                # Si au moins 2 axes alignés (trous traversants ou coaxiaux)
+                if aligned_axes >= 2:
+                    # Distance 3D totale
+                    dist_3d = (dx**2 + dy**2 + dz**2)**0.5
+                    
+                    # Si distance totale raisonnable
+                    if dist_3d < tolerance * 2:
+                        aligned.append((h1, h2))
+                        break  # Éviter doublons
+        
+        return aligned
 
 
     def _get_bounding_box(self, shape):
             """Calcule la boîte englobante pour l'analyse d'encombrement (Clash Detection)"""
             bbox = Bnd_Box()
-            brepbndlib_Add(shape, bbox)
+            brepbndlib.Add(shape, bbox)
             xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
             return {
                 'dims': [round(xmax-xmin, 2), round(ymax-ymin, 2), round(zmax-zmin, 2)],
@@ -348,33 +703,44 @@ class ConfigurationManager:
                 'planar_faces_count': 0
             }
             
-            explorer = TopExp_Explorer(shape, TopAbs_FACE)
-            while explorer.More():
-                face = explorer.Current()
-                surf = BRepAdaptor_Surface(face, True)
-                type_surf = surf.GetType()
-                
-                if type_surf == GeomAbs_Cylinder:
-                    cyl = surf.Cylinder()
-                    radius = cyl.Radius()
-                    loc = cyl.Location()
+            try:
+                explorer = TopExp_Explorer(shape, TopAbs_FACE)
+                while explorer.More():
+                    try:
+                        face = explorer.Current()
+                        surf = BRepAdaptor_Surface(face, True)
+                        type_surf = surf.GetType()
+                        
+                        if type_surf == GeomAbs_Cylinder:
+                            cyl = surf.Cylinder()
+                            radius = cyl.Radius()
+                            loc = cyl.Location()
+                            
+                            # On stocke le Diamètre ET la Position (arrondis pour la stabilité)
+                            # C'est la clé de la gestion d'assemblage : savoir OÙ est le trou.
+                            features['holes'].append({
+                                'd': round(radius * 2.0, 3), # Diamètre
+                                'x': round(loc.X(), 1),
+                                'y': round(loc.Y(), 1),
+                                'z': round(loc.Z(), 1)
+                            })
+                        
+                        elif type_surf == GeomAbs_Plane:
+                            features['planar_faces_count'] += 1
+                    except Exception as e:
+                        # Skip face if error, but continue processing
+                        if not self.silent:
+                            print(f"    Warning: Error processing face: {e}")
+                        pass
+                        
+                    explorer.Next()
                     
-                    # On stocke le Diamètre ET la Position (arrondis pour la stabilité)
-                    # C'est la clé de la gestion d'assemblage : savoir OÙ est le trou.
-                    features['holes'].append({
-                        'd': round(radius * 2.0, 3), # Diamètre
-                        'x': round(loc.X(), 1),
-                        'y': round(loc.Y(), 1),
-                        'z': round(loc.Z(), 1)
-                    })
+                # Tri pour garantir l'ordre déterministe (par diamètre puis position X)
+                features['holes'].sort(key=lambda k: (k['d'], k['x'], k['y']))
+            except Exception as e:
+                if not self.silent:
+                    print(f"    Warning: Error extracting features: {e}")
                 
-                elif type_surf == GeomAbs_Plane:
-                    features['planar_faces_count'] += 1
-                    
-                explorer.Next()
-                
-            # Tri pour garantir l'ordre déterministe (par diamètre puis position X)
-            features['holes'].sort(key=lambda k: (k['d'], k['x'], k['y']))
             return features
     def extract_colors(self):
         """Extrait les couleurs des composants"""
@@ -595,6 +961,56 @@ class ConfigurationManager:
             if item['label_entry'] == entry_str:
                 return item['name']
         return "Unknown"
+    
+    def build_component_path(self, label):
+        """Construit le chemin hiérarchique complet d'un composant
+        
+        Retourne une chaîne du type: "assembly > sub_assembly > part"
+        pour identifier de manière unique chaque composant même avec nom dupliqué.
+        """
+        entry = self.get_entry(label)
+        path_parts = []
+        
+        # Trouver le composant dans la BOM et remonter la hiérarchie
+        bom_dict = {item['label_entry']: item for item in self.bom}
+        
+        if entry in bom_dict:
+            current_item = bom_dict[entry]
+            path_parts.insert(0, current_item['name'])
+            
+            # Trouver les parents en cherchant les niveaux inférieurs
+            current_level = current_item['level']
+            current_pos = current_item['position']
+            
+            # Parcourir la BOM en arrière pour trouver les parents
+            for i in range(current_pos - 1, 0, -1):
+                if i <= len(self.bom):
+                    parent_item = self.bom[i-1]
+                    if parent_item['level'] < current_level:
+                        path_parts.insert(0, parent_item['name'])
+                        current_level = parent_item['level']
+                        if current_level == 0:
+                            break
+        
+        return " > ".join(path_parts) if path_parts else label.GetLabelName()
+    
+    def get_unique_component_name(self, label, entry):
+        """Génère un nom unique pour un composant
+        
+        Utilise le chemin hiérarchique si des doublons existent,
+        sinon retourne le nom simple.
+        """
+        name = label.GetLabelName()
+        
+        # Compter les occurrences de ce nom dans la BOM
+        name_count = sum(1 for item in self.bom if item['name'] == name)
+        
+        if name_count > 1:
+            # Il y a des doublons, utiliser le chemin complet
+            return self.build_component_path(label)
+        else:
+            # Nom unique, retourner tel quel
+            return name
     
     def export_to_csv(self):
         """Export BOM to CSV format"""

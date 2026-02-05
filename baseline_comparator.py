@@ -29,6 +29,14 @@ class BaselineComparator:
         self.baseline2_path = None
         self.baseline1 = None
         self.baseline2 = None
+        self._reset_changes()
+    
+    def _log(self, message):
+        """Log a message if not in silent mode"""
+        if not self.silent:
+            print(message)    
+    def _reset_changes(self):
+        """Reset changes dictionary"""
         self.changes = {
             'bom': [],
             'geometry': [],
@@ -37,13 +45,7 @@ class BaselineComparator:
             'components_added': [],
             'components_removed': [],
             'components_modified': []
-        }
-    
-    def _log(self, message):
-        """Log a message if not in silent mode"""
-        if not self.silent:
-            self._log(message)
-        
+        }        
     def load_baselines(self):
         """Charge les deux baselines (génère si fichiers STEP)"""
         try:
@@ -71,84 +73,19 @@ class BaselineComparator:
     
     def generate_baseline_from_step(self, step_file):
         """Génère une baseline à partir d'un fichier STEP"""
-        # Suppress all output during baseline generation
-        with redirect_stdout(io.StringIO()):
-            cm = ConfigurationManager(step_file, silent=True)
-            cm.build_bom()
-            cm.analyze_geometry()
-            cm.extract_colors()
-            cm.build_dependency_graph()
-            
+        if not os.path.exists(step_file):
+            raise FileNotFoundError(f"Fichier STEP introuvable: {step_file}")
+        
+        try:
+            # Suppress all output during baseline generation
+            with redirect_stdout(io.StringIO()):
+                cm = ConfigurationManager(step_file, silent=True)
+                cm.build_bom()
+                cm.analyze_geometry()
+                cm.extract_colors()
+                cm.build_dependency_graph()
+                
             self._log(f"  ✓ Baseline générée pour {step_file}")
-            
-            # Build BOM if not already done
-            if not cm.bom:
-                from OCC.Core.TDF import TDF_LabelSequence
-                labels = TDF_LabelSequence()
-                cm.shape_tool.GetShapes(labels)
-                
-                if labels.Length() > 0:
-                    rootlabel = labels.Value(1)
-                    if cm.shape_tool.IsAssembly(rootlabel):
-                        cm.bom_level = 0
-                        cm.bom_item_number = 1
-                        
-                        root_name = rootlabel.GetLabelName()
-                        cm.bom.append({
-                            'position': cm.bom_item_number,
-                            'level': cm.bom_level,
-                            'quantity': 1,
-                            'name': root_name,
-                            'label_entry': cm.get_entry(rootlabel),
-                            'type': 'Assembly'
-                        })
-                        
-                        cm.bom_item_number += 1
-                        
-                        top_comps = TDF_LabelSequence()
-                        cm.shape_tool.GetComponents(rootlabel, top_comps, False)
-                        
-                        # Suppress BOM output during processing
-                        with redirect_stdout(io.StringIO()):
-                            cm.process_bom_components(top_comps, 1)
-            
-            # Analyze geometry if not done
-            if not cm.geometric_props:
-                from OCC.Core.TDF import TDF_LabelSequence
-                from OCC.Core.BRepGProp import brepgprop
-                from OCC.Core.GProp import GProp_GProps
-                
-                labels = TDF_LabelSequence()
-                cm.shape_tool.GetFreeShapes(labels)
-                
-                for i in range(labels.Length()):
-                    label = labels.Value(i+1)
-                    if label.IsNull():
-                        continue
-                        
-                    name = label.GetLabelName()
-                    shape = cm.shape_tool.GetShape(label)
-                    
-                    if not shape.IsNull():
-                        # Calculate volume
-                        props_volume = GProp_GProps()
-                        brepgprop.VolumeProperties(shape, props_volume)
-                        volume = props_volume.Mass()
-                        
-                        # Calculate surface area
-                        props_surface = GProp_GProps()
-                        brepgprop.SurfaceProperties(shape, props_surface)
-                        surface = props_surface.Mass()
-                        
-                        # Center of gravity
-                        cog = props_volume.CentreOfMass()
-                        
-                        cm.geometric_props[cm.get_entry(label)] = {
-                            'name': name,
-                            'volume': volume,
-                            'surface_area': surface,
-                            'center_of_gravity': [cog.X(), cog.Y(), cog.Z()]
-                        }
             
             # Build baseline data structure
             baseline = {
@@ -165,13 +102,27 @@ class BaselineComparator:
             }
             
             return baseline
+            
+        except Exception as e:
+            raise RuntimeError(f"Échec de la génération de baseline pour {step_file}: {e}")
     
     def compare(self):
         """Effectue la comparaison complète"""
-        # Load baselines only if paths are set and baselines are not already loaded
+        # Validate baselines are loaded
         if self.baseline1 is None or self.baseline2 is None:
             if not self.load_baselines():
-                return False
+                raise RuntimeError("Impossible de charger les baselines")
+        
+        # Validate baseline structure
+        required_keys = ['baseline_id', 'timestamp', 'file', 'checksum', 'bom', 'geometric_properties']
+        for key in required_keys:
+            if key not in self.baseline1:
+                raise ValueError(f"Baseline 1 invalide: clé manquante '{key}'")
+            if key not in self.baseline2:
+                raise ValueError(f"Baseline 2 invalide: clé manquante '{key}'")
+        
+        # Reset changes for new comparison
+        self._reset_changes()
         
         self._log("="*80)
         self._log("COMPARAISON DE BASELINES DE CONFIGURATION")

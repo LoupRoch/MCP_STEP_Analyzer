@@ -2,6 +2,8 @@
 """
 MCP Server for STEP File Analysis and Comparison
 Serveur MCP pour l'analyse et la comparaison de fichiers STEP
+
+Utiliser avec le serveur MCP Filesystem pour accéder aux fichiers depuis Claude Desktop
 """
 
 import json
@@ -23,9 +25,43 @@ mcp = FastMCP("STEP Analyzer", version="2.0.0")
 
 
 # ============================================================================
+# UTILITY FUNCTIONS FOR FILE HANDLING
+# ============================================================================
+
+def _validate_file_path(file_path: str) -> str:
+    """Validate file path exists and has correct extension
+    
+    Args:
+        file_path: Path to STEP file (local or Docker volume mounted)
+        
+    Returns:
+        Validated file path
+        
+    Raises:
+        FileNotFoundError: If file not found
+        ValueError: If invalid file extension
+    """
+    if not file_path:
+        raise ValueError(
+            "Vous devez fournir 'file_path'. "
+            "Utilisez le serveur MCP filesystem pour accéder à vos fichiers."
+        )
+    
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"Fichier introuvable: {file_path}\n"
+            f"Vérifiez que le volume Docker est correctement monté ou que le fichier existe."
+        )
+    
+    if not (file_path.lower().endswith('.stp') or file_path.lower().endswith('.step')):
+        raise ValueError(f"Extension invalide. Attendu .stp ou .step, reçu: {file_path}")
+    
+    return file_path
+
+
+# ============================================================================
 # CORE ANALYSIS TOOLS
 # ============================================================================
-# Analyse complète d'un fichier STEP : métadonnées, structure et géométrie
 
 @mcp.tool()
 def analyze_step_file(file_path: str) -> Dict[str, Any]:
@@ -35,8 +71,10 @@ def analyze_step_file(file_path: str) -> Dict[str, Any]:
     la nomenclature (BOM), les propriétés géométriques et topologiques, les
     métadonnées du fichier et le graphe de dépendances.
     
+    Utilisez le serveur MCP filesystem pour lister et accéder à vos fichiers.
+    
     Args:
-        file_path: Chemin vers le fichier STEP à analyser
+        file_path: Chemin vers le fichier STEP à analyser (ex: /workspace/step/product.stp)
         
     Returns:
         Dictionnaire structuré contenant:
@@ -47,76 +85,81 @@ def analyze_step_file(file_path: str) -> Dict[str, Any]:
         - dependencies: graphe de dépendances entre composants
         - validation: résultat des vérifications de conformité
     """
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"Fichier introuvable: {file_path}")
-    
-    # Create configuration manager in silent mode
-    cm = ConfigurationManager(file_path, silent=True)
-    
-    # Perform all analyses
-    cm.build_bom()
-    cm.analyze_geometry()
-    cm.extract_colors()
-    cm.build_dependency_graph()
-    
-    # Validation checks
-    validation = _perform_validation(cm)
-    
-    # Calculate totals
-    total_volume = sum(p.get('volume', 0) for p in cm.geometric_props.values())
-    total_surface = sum(p.get('surface_area', 0) for p in cm.geometric_props.values())
-    
-    return {
-        "file": file_path,
-        "checksum": cm.calculate_file_checksum(),
-        "analyzed_at": datetime.now().isoformat(),
+    try:
+        # Resolve and validate file path
+        resolved_path = _validate_file_path(file_path)
         
-        "metadata": {
-            "description": cm.metadata.get('description'),
-            "schema": cm.metadata.get('schema'),
-            "timestamp": cm.metadata.get('timestamp'),
-            "author": cm.metadata.get('author'),
-            "products": cm.metadata.get('products', [])
-        },
+        # Create configuration manager in silent mode
+        cm = ConfigurationManager(resolved_path, silent=True)
         
-        "bom": {
-            "items": cm.bom,
-            "total_count": len(cm.bom),
-            "max_depth": max([item['level'] for item in cm.bom]) if cm.bom else 0
-        },
+        # Perform all analyses
+        cm.build_bom()
+        cm.analyze_geometry()
+        cm.extract_colors()
+        cm.build_dependency_graph()
         
-        "components": {
-            "registry": cm.components_registry,
-            "total_unique": len(cm.components_registry)
-        },
+        # Validation checks
+        validation = _perform_validation(cm)
         
-        "geometry": {
-            "properties": cm.geometric_props,
-            "totals": {
-                "volume_mm3": round(total_volume, 2),
-                "surface_mm2": round(total_surface, 2)
-            }
-        },
+        # Calculate totals
+        total_volume = sum(p.get('volume', 0) for p in cm.geometric_props.values())
+        total_surface = sum(p.get('surface_area', 0) for p in cm.geometric_props.values())
         
-        "colors": cm.colors_registry,
-        
-        "dependencies": dict(cm.dependency_graph),
-        
-        "validation": validation
-    }
+        return {
+            "file": file_path or "fichier_joint",
+            "checksum": cm.calculate_file_checksum(),
+            "analyzed_at": datetime.now().isoformat(),
+            
+            "metadata": {
+                "description": cm.metadata.get('description'),
+                "schema": cm.metadata.get('schema'),
+                "timestamp": cm.metadata.get('timestamp'),
+                "author": cm.metadata.get('author'),
+                "products": cm.metadata.get('products', [])
+            },
+            
+            "bom": {
+                "items": cm.bom,
+                "total_count": len(cm.bom),
+                "max_depth": max([item['level'] for item in cm.bom]) if cm.bom else 0
+            },
+            
+            "components": {
+                "registry": cm.components_registry,
+                "total_unique": len(cm.components_registry)
+            },
+            
+            "geometry": {
+                "properties": cm.geometric_props,
+                "totals": {
+                    "volume_mm3": round(total_volume, 2),
+                    "surface_mm2": round(total_surface, 2)
+                }
+            },
+            
+            "colors": cm.colors_registry,
+            
+            "dependencies": dict(cm.dependency_graph),
+            
+            "validation": validation
+        }
+    except Exception as e:
+        raise ValueError(f"Erreur lors de l'analyse du fichier STEP: {e}")
 
 
 @mcp.tool()
-def compare_step_files(file1: str, file2: str) -> Dict[str, Any]:
+def compare_step_files(file1_path: str, file2_path: str) -> Dict[str, Any]:
     """Compare deux fichiers STEP et détecte les différences critiques
     
     Effectue une comparaison détaillée incluant l'analyse d'impact pour
     détecter les risques de collision (clash), les problèmes d'assemblage
     et les changements fonctionnels. Inclut également l'analyse des interfaces.
     
+    Utilisez le serveur MCP filesystem pour lister et accéder à vos fichiers.
+    
     Args:
-        file1: Chemin vers le premier fichier STEP (baseline)
-        file2: Chemin vers le second fichier STEP (version modifiée)
+        file1_path: Chemin vers le premier fichier STEP (ex: /workspace/step/v1.stp)
+        file2_path: Chemin vers le second fichier STEP (ex: /workspace/step/v2.stp)
         
     Returns:
         Dictionnaire contenant:
@@ -125,91 +168,92 @@ def compare_step_files(file1: str, file2: str) -> Dict[str, Any]:
         - changes: différences détaillées (BOM, géométrie, topologie, interfaces)
         - summary: statistiques des changements
     """
-    if not file1 or not os.path.exists(file1):
-        raise FileNotFoundError(f"Fichier introuvable: {file1}")
-    if not file2 or not os.path.exists(file2):
-        raise FileNotFoundError(f"Fichier introuvable: {file2}")
-    
-    comparator = BaselineComparator(silent=True)
-    
-    # Suppress output during baseline generation
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        baseline1 = comparator.generate_baseline_from_step(file1)
-        baseline2 = comparator.generate_baseline_from_step(file2)
+    try:
+        # Resolve and validate both file paths
+        resolved_path1 = _validate_file_path(file1_path)
+        resolved_path2 = _validate_file_path(file2_path)
         
-        comparator.baseline1 = baseline1
-        comparator.baseline2 = baseline2
-        comparator.compare()
-    
-    # Analyser les interfaces pour les deux versions
-    cm1 = ConfigurationManager(file1, silent=True)
-    cm1.analyze_geometry()
-    interfaces1 = cm1.analyze_interfaces()
-    
-    cm2 = ConfigurationManager(file2, silent=True)
-    cm2.analyze_geometry()
-    interfaces2 = cm2.analyze_interfaces()
-    
-    # Comparer les interfaces
-    interface_changes = _compare_interfaces(interfaces1, interfaces2)
-    
-    # Analyze impact (incluant interfaces)
-    impact_analysis = _analyze_impact(comparator.changes, interface_changes)
-    
-    return {
-        "baselines": {
-            "baseline1": {
-                "id": baseline1.get('baseline_id'),
-                "file": file1,
-                "checksum": baseline1.get('checksum'),
-                "timestamp": baseline1.get('timestamp')
+        comparator = BaselineComparator(silent=True)
+        
+        # Suppress output during baseline generation
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            baseline1 = comparator.generate_baseline_from_step(resolved_path1)
+            baseline2 = comparator.generate_baseline_from_step(resolved_path2)
+            
+            comparator.baseline1 = baseline1
+            comparator.baseline2 = baseline2
+            comparator.compare()
+        
+        # Analyser les interfaces pour les deux versions
+        cm1 = ConfigurationManager(resolved_path1, silent=True)
+        cm1.analyze_geometry()
+        interfaces1 = cm1.analyze_interfaces()
+        
+        cm2 = ConfigurationManager(resolved_path2, silent=True)
+        cm2.analyze_geometry()
+        interfaces2 = cm2.analyze_interfaces()
+        
+        # Comparer les interfaces
+        interface_changes = _compare_interfaces(interfaces1, interfaces2)
+        
+        # Analyze impact (incluant interfaces)
+        impact_analysis = _analyze_impact(comparator.changes, interface_changes)
+        
+        return {
+            "baselines": {
+                "baseline1": {
+                    "id": baseline1.get('baseline_id'),
+                    "file": file1_path or "fichier_joint",
+                    "checksum": baseline1.get('checksum'),
+                    "timestamp": baseline1.get('timestamp')
+                },
+                "baseline2": {
+                    "id": baseline2.get('baseline_id'),
+                    "file": file2_path or "fichier_joint",
+                    "checksum": baseline2.get('checksum'),
+                    "timestamp": baseline2.get('timestamp')
+                }
             },
-            "baseline2": {
-                "id": baseline2.get('baseline_id'),
-                "file": file2,
-                "checksum": baseline2.get('checksum'),
-                "timestamp": baseline2.get('timestamp')
+            
+            "impact": impact_analysis,
+            
+            "changes": {
+                "bom": {
+                    "added": comparator.changes.get('components_added', []),
+                    "removed": comparator.changes.get('components_removed', []),
+                    "modified": comparator.changes.get('components_modified', [])
+                },
+                "geometry": comparator.changes.get('geometry', []),
+                "topology": comparator.changes.get('differences', []),
+                "metadata": comparator.changes.get('metadata', []),
+                "interfaces": interface_changes
+            },
+            
+            "summary": {
+                "total_changes": (
+                    len(comparator.changes.get('components_added', [])) +
+                    len(comparator.changes.get('components_removed', [])) +
+                    len(comparator.changes.get('components_modified', [])) +
+                    len(comparator.changes.get('differences', [])) +
+                    len(interface_changes.get('added', [])) +
+                    len(interface_changes.get('removed', [])) +
+                    len(interface_changes.get('modified', []))
+                ),
+                "components_added": len(comparator.changes.get('components_added', [])),
+                "components_removed": len(comparator.changes.get('components_removed', [])),
+                "geometry_changes": len(comparator.changes.get('differences', [])),
+                "interface_changes": len(interface_changes.get('added', [])) + 
+                                    len(interface_changes.get('removed', [])) + 
+                                    len(interface_changes.get('modified', []))
             }
-        },
-        
-        "impact": impact_analysis,
-        
-        "changes": {
-            "bom": {
-                "added": comparator.changes.get('components_added', []),
-                "removed": comparator.changes.get('components_removed', []),
-                "modified": comparator.changes.get('components_modified', [])
-            },
-            "geometry": comparator.changes.get('geometry', []),
-            "topology": comparator.changes.get('differences', []),
-            "metadata": comparator.changes.get('metadata', []),
-            "interfaces": interface_changes
-        },
-        
-        "summary": {
-            "total_changes": (
-                len(comparator.changes.get('components_added', [])) +
-                len(comparator.changes.get('components_removed', [])) +
-                len(comparator.changes.get('components_modified', [])) +
-                len(comparator.changes.get('differences', [])) +
-                len(interface_changes.get('added', [])) +
-                len(interface_changes.get('removed', [])) +
-                len(interface_changes.get('modified', []))
-            ),
-            "components_added": len(comparator.changes.get('components_added', [])),
-            "components_removed": len(comparator.changes.get('components_removed', [])),
-            "geometry_changes": len(comparator.changes.get('differences', [])),
-            "interface_changes": len(interface_changes.get('added', [])) + 
-                                len(interface_changes.get('removed', [])) + 
-                                len(interface_changes.get('modified', []))
         }
-    }
+    except Exception as e:
+        raise ValueError(f"Erreur lors de la comparaison: {e}")
 
 
 # ============================================================================
 # SPECIALIZED QUERY TOOLS
 # ============================================================================
-# Extrait uniquement la nomenclature (Bill of Materials) d'un fichier STEP
 
 @mcp.tool()
 def extract_bom(file_path: str) -> List[Dict[str, Any]]:
@@ -219,78 +263,85 @@ def extract_bom(file_path: str) -> List[Dict[str, Any]]:
     géométriques ni les analyses supplémentaires.
     
     Args:
-        file_path: Chemin vers le fichier STEP
+        file_path: Chemin vers le fichier STEP (ex: /workspace/step/product.stp)
         
     Returns:
         Liste des composants avec position, niveau, quantité, nom et type
     """
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"Fichier introuvable: {file_path}")
-    
-    cm = ConfigurationManager(file_path, silent=True)
-    cm.build_bom()
-    
-    return cm.bom
+    try:
+        resolved_path = _validate_file_path(file_path)
+        
+        cm = ConfigurationManager(resolved_path, silent=True)
+        cm.build_bom()
+        
+        return cm.bom
+    except Exception as e:
+        raise ValueError(f"Erreur lors de l'extraction de la BOM: {e}")
 
 
 @mcp.tool()
-def extract_geometry(file_path: str, component_name: Optional[str] = None) -> Dict[str, Any]:
+def extract_geometry(
+    file_path: str,
+    component_name: Optional[str] = None
+) -> Dict[str, Any]:
     """Extrait les propriétés géométriques d'un fichier STEP
     
     Retourne les propriétés géométriques et topologiques pour tous les
     composants ou pour un composant spécifique.
     
     Args:
-        file_path: Chemin vers le fichier STEP
+        file_path: Chemin vers le fichier STEP (ex: /workspace/step/product.stp)
         component_name: Nom du composant spécifique (optionnel)
                        Peut être le nom simple ('beak') ou le chemin complet ('jasper_v13 > beak')
         
     Returns:
         Dictionnaire avec propriétés par composant et totaux agrégés
     """
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"Fichier introuvable: {file_path}")
-    
-    cm = ConfigurationManager(file_path, silent=True)
-    cm.analyze_geometry()
-    
-    # Filter by component if specified
-    if component_name:
-        # Chercher par nom simple ou nom unique/chemin
-        filtered = {
-            k: v for k, v in cm.geometric_props.items()
-            if v.get('name') == component_name or 
-               v.get('unique_name') == component_name or
-               v.get('path') == component_name
+    try:
+        resolved_path = _validate_file_path(file_path)
+        
+        cm = ConfigurationManager(resolved_path, silent=True)
+        cm.analyze_geometry()
+        
+        # Filter by component if specified
+        if component_name:
+            # Chercher par nom simple ou nom unique/chemin
+            filtered = {
+                k: v for k, v in cm.geometric_props.items()
+                if v.get('name') == component_name or 
+                   v.get('unique_name') == component_name or
+                   v.get('path') == component_name
+            }
+            if not filtered:
+                # Construire message d'erreur avec suggestions
+                available_names = set()
+                for props in cm.geometric_props.values():
+                    available_names.add(props.get('name'))
+                    if props.get('unique_name') != props.get('name'):
+                        available_names.add(props.get('unique_name'))
+                
+                suggestions = sorted(available_names)[:10]
+                raise ValueError(
+                    f"Composant '{component_name}' introuvable.\n"
+                    f"Composants disponibles: {', '.join(suggestions)}"
+                    + (f"\n... et {len(available_names) - 10} autres" if len(available_names) > 10 else "")
+                )
+            return {"components": filtered}
+        
+        # Calculate totals
+        total_volume = sum(p.get('volume', 0) for p in cm.geometric_props.values())
+        total_surface = sum(p.get('surface_area', 0) for p in cm.geometric_props.values())
+        
+        return {
+            "components": cm.geometric_props,
+            "totals": {
+                "volume_mm3": round(total_volume, 2),
+                "surface_mm2": round(total_surface, 2),
+                "component_count": len(cm.geometric_props)
+            }
         }
-        if not filtered:
-            # Construire message d'erreur avec suggestions
-            available_names = set()
-            for props in cm.geometric_props.values():
-                available_names.add(props.get('name'))
-                if props.get('unique_name') != props.get('name'):
-                    available_names.add(props.get('unique_name'))
-            
-            suggestions = sorted(available_names)[:10]
-            raise ValueError(
-                f"Composant '{component_name}' introuvable.\n"
-                f"Composants disponibles: {', '.join(suggestions)}"
-                + (f"\n... et {len(available_names) - 10} autres" if len(available_names) > 10 else "")
-            )
-        return {"components": filtered}
-    
-    # Calculate totals
-    total_volume = sum(p.get('volume', 0) for p in cm.geometric_props.values())
-    total_surface = sum(p.get('surface_area', 0) for p in cm.geometric_props.values())
-    
-    return {
-        "components": cm.geometric_props,
-        "totals": {
-            "volume_mm3": round(total_volume, 2),
-            "surface_mm2": round(total_surface, 2),
-            "component_count": len(cm.geometric_props)
-        }
-    }
+    except Exception as e:
+        raise ValueError(f"Erreur lors de l'extraction de la géométrie: {e}")
 
 
 @mcp.tool()
@@ -301,19 +352,21 @@ def validate_step_file(file_path: str) -> Dict[str, Any]:
     les problèmes de conformité, les incohérences et les avertissements.
     
     Args:
-        file_path: Chemin vers le fichier STEP
+        file_path: Chemin vers le fichier STEP (ex: /workspace/step/product.stp)
         
     Returns:
         Dictionnaire avec statut global et détails des vérifications
     """
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"Fichier introuvable: {file_path}")
-    
-    cm = ConfigurationManager(file_path, silent=True)
-    cm.build_bom()
-    cm.analyze_geometry()
-    
-    return _perform_validation(cm)
+    try:
+        resolved_path = _validate_file_path(file_path)
+        
+        cm = ConfigurationManager(resolved_path, silent=True)
+        cm.build_bom()
+        cm.analyze_geometry()
+        
+        return _perform_validation(cm)
+    except Exception as e:
+        raise ValueError(f"Erreur lors de la validation: {e}")
 
 
 @mcp.tool()
@@ -330,7 +383,7 @@ def analyze_interfaces(file_path: str) -> Dict[str, Any]:
     par des modifications géométriques.
     
     Args:
-        file_path: Chemin vers le fichier STEP
+        file_path: Chemin vers le fichier STEP (ex: /workspace/step/product.stp)
         
     Returns:
         Dictionnaire contenant:
@@ -339,80 +392,81 @@ def analyze_interfaces(file_path: str) -> Dict[str, Any]:
         - critical_joints: interfaces critiques (vissages) nécessitant attention
         - assembly_graph: graphe des connexions entre composants
     """
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"Fichier introuvable: {file_path}")
-    
-    cm = ConfigurationManager(file_path, silent=True)
-    cm.build_bom()
-    cm.analyze_geometry()
-    interfaces = cm.analyze_interfaces()
-    
-    # Grouper par type
-    from collections import defaultdict
-    by_type = defaultdict(list)
-    for iface in interfaces:
-        by_type[iface['type']].append(iface)
-    
-    # Identifier les interfaces critiques (vissages)
-    critical_joints = [
-        iface for iface in interfaces 
-        if iface['type'] == 'fastening'
-    ]
-    
-    # Construire le graphe d'assemblage
-    assembly_graph = {}
-    for iface in interfaces:
-        comp1 = iface['component1']
-        comp2 = iface['component2']
+    try:
+        resolved_path = _validate_file_path(file_path)
         
-        if comp1 not in assembly_graph:
-            assembly_graph[comp1] = []
-        if comp2 not in assembly_graph:
-            assembly_graph[comp2] = []
+        cm = ConfigurationManager(resolved_path, silent=True)
+        cm.build_bom()
+        cm.analyze_geometry()
+        interfaces = cm.analyze_interfaces()
         
-        assembly_graph[comp1].append({
-            'connected_to': comp2,
-            'type': iface['type'],
-            'severity': iface['severity']
-        })
-        assembly_graph[comp2].append({
-            'connected_to': comp1,
-            'type': iface['type'],
-            'severity': iface['severity']
-        })
-    
-    return {
-        "file": file_path,
-        "analyzed_at": datetime.now().isoformat(),
+        # Grouper par type
+        from collections import defaultdict
+        by_type = defaultdict(list)
+        for iface in interfaces:
+            by_type[iface['type']].append(iface)
         
-        "interfaces": interfaces,
+        # Identifier les interfaces critiques (vissages)
+        critical_joints = [
+            iface for iface in interfaces 
+            if iface['type'] == 'fastening'
+        ]
         
-        "summary": {
-            "total_interfaces": len(interfaces),
-            "by_type": {
-                "fastening": len(by_type['fastening']),
-                "contact": len(by_type['contact']),
-                "proximity": len(by_type['proximity'])
+        # Construire le graphe d'assemblage
+        assembly_graph = {}
+        for iface in interfaces:
+            comp1 = iface['component1']
+            comp2 = iface['component2']
+            
+            if comp1 not in assembly_graph:
+                assembly_graph[comp1] = []
+            if comp2 not in assembly_graph:
+                assembly_graph[comp2] = []
+            
+            assembly_graph[comp1].append({
+                'connected_to': comp2,
+                'type': iface['type'],
+                'severity': iface['severity']
+            })
+            assembly_graph[comp2].append({
+                'connected_to': comp1,
+                'type': iface['type'],
+                'severity': iface['severity']
+            })
+        
+        return {
+            "file": file_path or "fichier_joint",
+            "analyzed_at": datetime.now().isoformat(),
+            
+            "interfaces": interfaces,
+            
+            "summary": {
+                "total_interfaces": len(interfaces),
+                "by_type": {
+                    "fastening": len(by_type['fastening']),
+                    "contact": len(by_type['contact']),
+                    "proximity": len(by_type['proximity'])
+                },
+                "by_severity": {
+                    "critical": sum(1 for i in interfaces if i['severity'] == 'critical'),
+                    "major": sum(1 for i in interfaces if i['severity'] == 'major'),
+                    "minor": sum(1 for i in interfaces if i['severity'] == 'minor')
+                }
             },
-            "by_severity": {
-                "critical": sum(1 for i in interfaces if i['severity'] == 'critical'),
-                "major": sum(1 for i in interfaces if i['severity'] == 'major'),
-                "minor": sum(1 for i in interfaces if i['severity'] == 'minor')
-            }
-        },
-        
-        "critical_joints": critical_joints,
-        
-        "assembly_graph": assembly_graph,
-        
-        "recommendations": _generate_interface_recommendations(interfaces)
-    }
+            
+            "critical_joints": critical_joints,
+            
+            "assembly_graph": assembly_graph,
+            
+            "recommendations": _generate_interface_recommendations(interfaces)
+        }
+    except Exception as e:
+        raise ValueError(f"Erreur lors de l'analyse des interfaces: {e}")
 
 
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-# Effectue les vérifications de validation
 
 def _perform_validation(cm: ConfigurationManager) -> Dict[str, Any]:
     """Effectue les vérifications de validation"""
@@ -617,7 +671,6 @@ def _analyze_impact(changes: Dict[str, List], interface_changes: Dict = None) ->
     
     # Determine overall impact level
     if impact_report["interface_risks"]:
-        # Vérifier si des fixations critiques ont changé
         critical_interface = any(
             risk['severity'] == 'critical' 
             for risk in impact_report["interface_risks"]
@@ -668,18 +721,8 @@ def _analyze_impact(changes: Dict[str, List], interface_changes: Dict = None) ->
 
 
 def _compare_interfaces(interfaces1: List[Dict], interfaces2: List[Dict]) -> Dict[str, List]:
-    """Compare deux listes d'interfaces pour détecter ajouts, suppressions et modifications
-    
-    Args:
-        interfaces1: Interfaces de la baseline
-        interfaces2: Interfaces de la version modifiée
-    
-    Returns:
-        Dict avec clés 'added', 'removed', 'modified'
-    """
-    # Créer des clés uniques pour chaque interface
+    """Compare deux listes d'interfaces pour détecter ajouts, suppressions et modifications"""
     def make_key(iface):
-        # Trier les composants pour que A-B == B-A
         comps = sorted([iface['component1'], iface['component2']])
         return f"{comps[0]}||{comps[1]}||{iface['type']}"
     
@@ -689,21 +732,15 @@ def _compare_interfaces(interfaces1: List[Dict], interfaces2: List[Dict]) -> Dic
     keys1 = set(ifaces1_dict.keys())
     keys2 = set(ifaces2_dict.keys())
     
-    # Interfaces ajoutées
     added = [ifaces2_dict[key] for key in (keys2 - keys1)]
-    
-    # Interfaces supprimées
     removed = [ifaces1_dict[key] for key in (keys1 - keys2)]
     
-    # Interfaces modifiées (même paire de composants, même type, mais propriétés différentes)
     modified = []
     for key in (keys1 & keys2):
         iface1 = ifaces1_dict[key]
         iface2 = ifaces2_dict[key]
-        
         changes = []
         
-        # Pour les fixations, vérifier changements de nombre ou diamètre
         if iface1['type'] == 'fastening':
             if iface1['fastener_count'] != iface2['fastener_count']:
                 changes.append(
@@ -714,11 +751,10 @@ def _compare_interfaces(interfaces1: List[Dict], interfaces2: List[Dict]) -> Dic
                     f"Diamètre: Ø{iface1['fastener_diameter']}mm → Ø{iface2['fastener_diameter']}mm"
                 )
         
-        # Pour les contacts, vérifier changement de distance
         if iface1['type'] in ['contact', 'proximity']:
             dist1 = iface1.get('distance', 0)
             dist2 = iface2.get('distance', 0)
-            if abs(dist1 - dist2) > 1.0:  # Changement > 1mm
+            if abs(dist1 - dist2) > 1.0:
                 changes.append(
                     f"Distance: {dist1:.1f}mm → {dist2:.1f}mm"
                 )
@@ -741,7 +777,6 @@ def _generate_interface_recommendations(interfaces: List[Dict]) -> List[str]:
     """Génère des recommandations basées sur l'analyse des interfaces"""
     recommendations = []
     
-    # Compter les fixations
     fastening_count = sum(1 for i in interfaces if i['type'] == 'fastening')
     if fastening_count == 0:
         recommendations.append(
@@ -753,7 +788,6 @@ def _generate_interface_recommendations(interfaces: List[Dict]) -> List[str]:
             "Considérer d'ajouter des points de fixation pour la rigidité."
         )
     
-    # Vérifier les fixations par composant
     from collections import defaultdict
     comp_fasteners = defaultdict(int)
     for iface in interfaces:
@@ -761,14 +795,12 @@ def _generate_interface_recommendations(interfaces: List[Dict]) -> List[str]:
             comp_fasteners[iface['component1']] += 1
             comp_fasteners[iface['component2']] += 1
     
-    # Composants critiques (beaucoup de fixations)
     critical_comps = {comp: count for comp, count in comp_fasteners.items() if count >= 3}
     if critical_comps:
         recommendations.append(
             f"🔧 Composants critiques (≥3 fixations): {', '.join(list(critical_comps.keys())[:3])}"
         )
     
-    # Composants isolés (pas de fixation)
     all_comps = set()
     for iface in interfaces:
         all_comps.add(iface['component1'])
@@ -782,7 +814,6 @@ def _generate_interface_recommendations(interfaces: List[Dict]) -> List[str]:
             f"⚠️ Composants sans fixation directe: {', '.join(list(isolated_comps)[:3])}"
         )
     
-    # Diamètres de fixation variés
     diameters = set()
     for iface in interfaces:
         if iface['type'] == 'fastening':
@@ -801,5 +832,4 @@ def _generate_interface_recommendations(interfaces: List[Dict]) -> List[str]:
 
 
 if __name__ == "__main__":
-    # Run the FastMCP server
     mcp.run()

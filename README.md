@@ -4,8 +4,6 @@
 
 Serveur MCP (Model Context Protocol) pour l'analyse et la comparaison de fichiers STEP (ISO 10303). Compatible avec Claude Desktop et autres clients MCP.
 
-**Avantage** : Analysez directement les fichiers STEP joints à Claude Desktop sans besoin de chemin d'accès !
-
 ## ✨ Fonctionnalités
 
 Le serveur expose 6 outils via le protocole MCP :
@@ -377,26 +375,6 @@ docker images | grep mcp_stepanalyzer
 2. Testez : `python MCP_STEP.py`
 3. Redémarrez Claude Desktop
 4. Vérifiez les logs dans `~/Library/Logs/Claude/` (macOS)
-
-### Erreur "Fichier introuvable" avec fichier joint
-
-Le serveur MCP Docker ne peut pas accéder directement aux fichiers joints. Solutions :
-
-1. **Utiliser le serveur filesystem** (recommandé) :
-   - Copiez vos fichiers dans le dossier monté
-   - Utilisez le serveur filesystem pour lister les fichiers
-   - Demandez à Claude d'analyser via le chemin `/workspace/step/fichier.stp`
-
-2. **Monter un volume temporaire** :
-   - Ajoutez un montage pour un dossier temporaire dans la configuration Docker
-   - Copiez-y vos fichiers avant analyse
-
-### Le serveur accepte les fichiers joints mais les analyse mal
-
-Vérifiez que pythonocc-core est correctement installé :
-```bash
-python -c "from OCC.Core.STEPControl import STEPControl_Reader; print('OK')"
-```
 
 ## 📄 Licence
 
